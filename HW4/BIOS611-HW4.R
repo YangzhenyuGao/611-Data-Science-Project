@@ -1,0 +1,381 @@
+# Load required packages
+library(data.table)
+library(tidyverse)
+library(tidytext)
+library(wordcloud)
+
+############################################################
+# Task 1: UFO Shape Table (U.S. only)
+############################################################
+
+# 1. Read the data
+data <- fread("E:/PHD_UNC/BIOS611/data/nuforc_sightings.csv")
+
+# 2. Filter to USA only
+us_data <- data %>%
+  filter(country == "USA" & state != "" & !is.na(state))
+
+# 3. Clean the "shape" column
+us_data <- us_data %>%
+  mutate(shape = str_to_title(trimws(shape)))   # standardize capitalization
+
+# Replace blanks or NAs with "Unknown"
+us_data <- us_data %>%
+  mutate(shape = ifelse(shape == "" | is.na(shape), "Unknown", shape))
+
+# Clean the "state" column
+us_data <- us_data %>%
+  mutate(state = toupper(state)) %>%
+  mutate(state = case_when(
+    state == "NEW YORK"      ~ "NY",
+    state == "MONTANA"        ~ "MT",
+    state == "OHIO"           ~ "OH",
+    state == "WEST VIRGINIA"  ~ "WV",
+    state == "WISCONSIN"      ~ "WI",
+    TRUE                     ~ state
+  )) %>%
+  filter(state %in% c(
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", 
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", 
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", 
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", 
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY")
+    ## "AS", "DC", "FM", "GU", "MH", "MP", "PW", "PR", "VI", "UM"
+  )
+
+# 4. Count number of sightings for each state × shape
+shape_table <- us_data %>%
+  count(state, shape, name = "n") %>%
+  pivot_wider(names_from = shape, values_from = n, values_fill = 0)
+
+# View first few rows of the matrix
+head(shape_table)
+
+# 5. Answer questions
+# Q1: How many distinct known shapes (excluding "Other" and "Unknown")?
+distinct_shapes <- us_data %>%
+  filter(!shape %in% c("Other", "Unknown")) %>%
+  distinct(shape) %>%
+  arrange(shape)
+
+num_shapes <- nrow(distinct_shapes)
+cat("Number of distinct known shapes (excluding Other/Unknown):", num_shapes, "\n")
+
+# Q2: Which state has the most 'Circle' sightings?
+circle_counts <- us_data %>%
+  filter(shape == "Circle") %>%
+  count(state, sort = TRUE)
+
+top_circle_state <- circle_counts %>% slice(1)
+cat("State with most Circle sightings:\n")
+print(top_circle_state)
+
+
+cat(
+  "Task 1 Summary:\n",
+  "After cleaning the dataset, we retained", nrow(us_data), "U.S. reports.\n",
+  "There are", num_shapes, "distinct known UFO shapes (excluding 'Other' and 'Unknown').\n",
+  "The state with the most 'Circle' sightings is", top_circle_state$state,
+  "with", top_circle_state$n, "reports.\n"
+)
+
+
+############################################################
+# Task 2: PCA on the shape table
+############################################################
+
+# 1. Prepare data for PCA: Convert counts to proportions (row-normalize)
+# The first column is 'state', which we need to preserve for labeling later
+state_labels <- shape_table$state
+
+# Create a matrix of counts only (excluding the state column)
+shape_counts_matrix <- as.matrix(shape_table[, -1])
+
+# Calculate row sums (total sightings per state)
+total_sightings_per_state <- rowSums(shape_counts_matrix)
+
+# Normalize by dividing each count by the state's total sightings
+# We add a small epsilon (1e-9) to avoid division by zero for states with no sightings
+shape_proportions <- shape_counts_matrix / (total_sightings_per_state + 1e-9)
+
+# 2. Perform PCA
+# We use center = TRUE and scale. = TRUE as is standard practice
+pca_result <- prcomp(shape_proportions, center = TRUE, scale. = TRUE)
+
+# 3. Create a scree plot to see variance explained by each PC
+# Extract the variance explained by each component
+variance_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+# Create a data frame for plotting
+scree_data <- data.frame(
+  Component = 1:length(variance_explained),
+  Proportion_of_Variance = variance_explained
+)
+
+# Plot the scree plot
+scree_plot <- ggplot(scree_data, aes(x = Component, y = Proportion_of_Variance)) +
+  geom_col(fill = "steelblue") +
+  geom_line(aes(y = Proportion_of_Variance), color = "red", group = 1) +
+  geom_point(color = "red", size = 2) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Scree Plot of UFO Shape PCA",
+    x = "Principal Component",
+    y = "Proportion of Variance Explained"
+  ) +
+  theme_minimal()
+
+print(scree_plot)
+cat(
+  "Scree Plot Analysis:\n",
+  "The scree plot shows a gradual decline in variance explained, without a clear 'elbow' after the first few components.\n",
+  "PC1 accounts for", scales::percent(variance_explained[1], accuracy = 0.1), "and PC2 for", scales::percent(variance_explained[2], accuracy = 0.1), 
+  ", bringing the cumulative total for the first two to a modest", scales::percent(sum(variance_explained[1:2]), accuracy = 0.1), ".\n",
+  "This low percentage suggests that the patterns of UFO shape reports are highly complex and multi-faceted. The data cannot be\n",
+  "effectively reduced to just one or two dimensions, meaning the differences in shape distributions between states are subtle and driven by many factors.\n\n"
+)
+
+# 4. Plot the first two principal components (PC1 vs PC2)
+# Create a data frame with state labels and the first two PCs
+pca_scores <- as.data.frame(pca_result$x[, 1:2])
+pca_scores$state <- state_labels
+
+# Create the scatterplot
+pca_plot <- ggplot(pca_scores, aes(x = PC1, y = PC2, label = state)) +
+  geom_point(color = "red") +
+  geom_text(vjust = -0.7, hjust = 0.5, size = 3, check_overlap = TRUE) +
+  labs(
+    title = "PCA of UFO Sightings by State",
+    subtitle = "States with similar shape distributions appear closer together",
+    x = paste0("Principal Component 1 (", scales::percent(variance_explained[1], accuracy = 0.1), ")"),
+    y = paste0("Principal Component 2 (", scales::percent(variance_explained[2], accuracy = 0.1), ")")
+  ) +
+  theme_minimal()
+
+print(pca_plot)
+cat(
+  "PC1 vs PC2 Plot Analysis:\n",
+  "The scatterplot of the first two principal components reveals how states relate based on their UFO shape profiles.\n",
+  "Most states are clustered near the center, indicating a generally similar distribution of reported shapes across the country.\n",
+  "However, there are a few potential outliers which are distinctly separated from the main cluster.\n"
+)
+
+
+# 5. Examine the loadings for PC1 and PC2
+# The loadings show how much each original variable (shape) contributes to a PC
+loadings <- as.data.frame(pca_result$rotation[, 1:2])
+loadings$shape <- rownames(loadings)
+
+# Get the top contributors to PC1
+pc1_loadings <- loadings %>%
+  select(shape, PC1) %>%
+  arrange(desc(abs(PC1)))
+
+# Get the top contributors to PC2
+pc2_loadings <- loadings %>%
+  select(shape, PC2) %>%
+  arrange(desc(abs(PC2)))
+
+cat("Top Shape Contributors to PC1:\n")
+print(head(pc1_loadings))
+cat("\nTop Shape Contributors to PC2:\n")
+print(head(pc2_loadings))
+
+cat(
+  "\nLoadings Analysis:\n",
+  "Based on the loadings, PC1 is most strongly influenced by a contrast between two types of shapes. On the negative side are 'Light', 'Flash', and 'Orb' (amorphous light phenomena), while on the positive side are 'Triangle', 'Disk', and 'Cigar' (classic, structured craft).\n",
+  "Therefore, PC1 can be interpreted as a spectrum from sightings of 'Unstructured Lights' (negative scores) to 'Structured Objects' (positive scores).\n",
+  "PC2 is primarily driven by a contrast between 'Unknown' (strong negative loading) and well-defined geometric shapes like 'Circle' and 'Sphere' (strong positive loadings).\n"
+)
+
+
+############################################################
+# Task 3: Clean and tokenize the summaries
+############################################################
+
+# 1. Clean and Tokenize Summaries
+# We will create a new data frame for the text analysis
+# This keeps the original us_data intact
+# 1. Clean and Tokenize Summaries
+summary_tokens <- us_data %>%
+  # Just work with the summary column
+  transmute(summary = summary) %>%
+  # Clean the text using the more reliable method
+  mutate(summary = tolower(summary),
+         summary = gsub("[^[:print:]]", " ", summary), # Replace non-printable chars with a space
+         summary = str_squish(summary)) %>%            # Trim and squeeze whitespace
+  # Tokenize
+  unnest_tokens(word, summary)
+
+# 2. Analyze Initial Word Frequency
+# Count the frequency of each word
+initial_word_counts <- summary_tokens %>%
+  count(word, sort = TRUE)
+
+cat("Top 20 most frequent words (before stopword removal):\n")
+print(head(initial_word_counts, 20))
+
+# Plot the most frequent words
+initial_freq_plot <- initial_word_counts %>%
+  head(20) %>%
+  mutate(word = reorder(word, n)) %>% # Reorder for plotting
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() + # Makes labels easier to read
+  labs(
+    title = "Top 20 Most Frequent Words in Summaries",
+    subtitle = "Before stopword removal",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+print(initial_freq_plot)
+
+cat(
+  "\nInitial Word Frequency Analysis:\n",
+  "The initial output is dominated by common English 'stopwords' like 'the', 'a', 'in', 'and', 'i', 'of', and 'to'.\n",
+  "These words are essential for sentence structure but provide little to no insight into the specific content or context of the UFO reports.\n",
+  "They are generic and need to be removed to uncover meaningful patterns.\n\n"
+)
+
+# 3. Remove Stopwords and Re-analyze
+# The `tidytext` package includes a dataset called `stop_words`
+# We use an anti_join to remove all words present in the stop_words list
+tokens_no_stopwords <- summary_tokens %>%
+  anti_join(stop_words, by = "word")
+
+# Count word frequency again
+word_counts_clean <- tokens_no_stopwords %>%
+  count(word, sort = TRUE)
+
+cat("Top 20 most frequent words (after stopword removal):\n")
+print(head(word_counts_clean, 20))
+
+# Plot the new most frequent words
+clean_freq_plot <- word_counts_clean %>%
+  head(20) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top 20 Most Frequent Words in Summaries",
+    subtitle = "After stopword removal",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+print(clean_freq_plot)
+
+cat(
+  "\nAnalysis After Stopword Removal:\n",
+  "After removing stopwords, the word list becomes much more insightful and relevant to the topic of UFO sightings.\n",
+  "Words like 'light', 'sky', 'object', 'lights', 'night', 'moving', and 'white' are now at the top.\n",
+  "These words feel highly characteristic of these reports, painting a picture of witnesses seeing luminous, moving objects\n",
+  "in the night sky. This provides a much clearer thematic summary of the dataset.\n\n"
+)
+
+
+# 4. (Optional) Create a Word Cloud
+cat("Generating word cloud...\n")
+
+# Set a seed for reproducibility of the word cloud layout
+set.seed(1234)
+
+# Create the word cloud
+wordcloud(words = word_counts_clean$word, 
+          freq = word_counts_clean$n, 
+          min.freq = 5, # Only plot words that appear at least 5 times
+          max.words = 150, # Limit the number of words
+          random.order = FALSE, # Plot most frequent words in the center
+          colors = RColorBrewer::brewer.pal(8, "Dark2"))
+
+############################################################
+# Task 4: Build the keyword table and repeat PCA
+############################################################
+
+# 1. Define a vocabulary of the top 100 words (min 3 characters)
+# We use the 'word_counts_clean' data frame created in Task 3
+vocabulary <- word_counts_clean %>%
+  filter(nchar(word) >= 3) %>%
+  head(100) %>%
+  pull(word) # Extracts the 'word' column as a character vector
+
+cat("Vocabulary of", length(vocabulary), "words has been created.\n\n")
+
+# 2. Create the new state-by-keyword table
+# First, we need to re-tokenize the summaries while keeping the 'state' information
+state_tokens <- us_data %>%
+  select(state, summary) %>%
+  # Apply the same cleaning steps from Task 3
+  mutate(summary = tolower(summary),
+         summary = gsub("[^[:print:]]", " ", summary),
+         summary = str_squish(summary)) %>%
+  # Tokenize and remove stopwords
+  unnest_tokens(word, summary) %>%
+  anti_join(stop_words, by = "word")
+
+# Now, create the wide table using the defined vocabulary
+state_keyword_table <- state_tokens %>%
+  filter(word %in% vocabulary) %>%
+  count(state, word, name = "n") %>%
+  pivot_wider(names_from = word, values_from = n, values_fill = 0)
+
+cat("State-by-Keyword table created with", nrow(state_keyword_table), "states and", ncol(state_keyword_table) - 1, "keywords.\n\n")
+
+
+# 3. Repeat the PCA on the new keyword table
+# a. Prepare the data for PCA (row-normalize)
+keyword_state_labels <- state_keyword_table$state
+keyword_counts_matrix <- as.matrix(state_keyword_table[, -1])
+total_words_per_state <- rowSums(keyword_counts_matrix)
+keyword_proportions <- keyword_counts_matrix / (total_words_per_state + 1e-9)
+
+# b. Perform PCA
+keyword_pca_result <- prcomp(keyword_proportions, center = TRUE, scale. = TRUE)
+keyword_variance_explained <- keyword_pca_result$sdev^2 / sum(keyword_pca_result$sdev^2)
+
+# c. Plot the new PCA results
+keyword_pca_scores <- as.data.frame(keyword_pca_result$x[, 1:2])
+keyword_pca_scores$state <- keyword_state_labels
+
+keyword_pca_plot <- ggplot(keyword_pca_scores, aes(x = PC1, y = PC2, label = state)) +
+  geom_point(color = "blue") +
+  geom_text(vjust = -0.7, hjust = 0.5, size = 3, check_overlap = TRUE) +
+  labs(
+    title = "PCA of UFO Sighting Keywords by State",
+    subtitle = "States with similar keyword distributions appear closer together",
+    x = paste0("Principal Component 1 (", scales::percent(keyword_variance_explained[1], accuracy = 0.1), ")"),
+    y = paste0("Principal Component 2 (", scales::percent(keyword_variance_explained[2], accuracy = 0.1), ")")
+  ) +
+  theme_minimal()
+
+print(keyword_pca_plot)
+
+# d. Examine the new loadings
+keyword_loadings <- as.data.frame(keyword_pca_result$rotation[, 1:2])
+keyword_loadings$word <- rownames(keyword_loadings)
+
+cat("Top Keyword Contributors to PC1:\n")
+print(keyword_loadings %>% select(word, PC1) %>% arrange(desc(abs(PC1))) %>% head())
+
+cat("\nTop Keyword Contributors to PC2:\n")
+print(keyword_loadings %>% select(word, PC2) %>% arrange(desc(abs(PC2))) %>% head())
+
+
+# 4. Compare keyword PCA with shape PCA
+cat(
+  "\n## Final Comparison: Shape PCA vs. Keyword PCA ##\n\n",
+  "The two PCA results provide complementary views of the UFO sighting data. The keyword-based PCA explains less variance with its initial components (19.7% vs. 25.8% for shapes), which confirms that the textual descriptions are even more complex and multi-faceted than the shape classifications.\n\n",
+  "Similarities:\n",
+  "Both analyses show that most states cluster tightly around the origin, indicating a shared baseline of how UFOs are reported across the country. Furthermore, states like Hawaii (HI) and North Dakota (ND) are significant outliers in both plots, strongly suggesting that the reports from these states are consistently unusual in both the shapes seen and the specific language used.\n\n",
+  "Differences and Alignment:\n\n",
+  "   PC1 — A Striking Alignment:\n",
+  "   The most compelling finding is the powerful alignment between the first principal components of both analyses. The Shape PCA's PC1 contrasts amorphous shapes ('Light', 'Flash') with structured ones ('Triangle', 'Disk'). Similarly, the Keyword PCA's PC1 contrasts descriptive words like 'bright' and 'light' with words for structured objects like 'triangular' and 'craft'. This reveals that the single largest source of variation in U.S. UFO reports is the fundamental difference between observing an Amorphous Light vs. a Structured Craft.\n\n",
+  "   PC2 — A Clear Divergence:\n",
+  "   The second components tell completely different stories. The Shape PCA's PC2 distinguishes reports based on Clarity, contrasting 'Unknown' sightings with well-defined geometric shapes like 'Circle' and 'Sphere'. In contrast, the Keyword PCA's PC2 is overwhelmingly driven by Directional Language, with words like 'east', 'south', 'north', and 'west' being the top contributors. This uncovers a new dimension: the second major pattern in sighting narratives is not about the object's shape, but whether the witness described its location or direction of travel.\n\n",
+  "Conclusion:\n",
+  "While the shape analysis provides a clear typology of what is seen, the keyword analysis validates the most dominant pattern (Lights vs. Craft) and enriches our understanding by revealing a secondary, independent pattern related to the narrative style of the report. The two methods work together to paint a more complete picture of the UFO phenomenon.\n"
+)
